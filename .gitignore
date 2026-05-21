@@ -1,0 +1,51 @@
+# 环境变量 (敏感信息)
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 数据库缓存
+*.db
+wecom_cache.db
+
+# 日志文件
+*.log
+server.log
+
+# 本地开发文件
+*.local
+.DS_Store
+Thumbs.db

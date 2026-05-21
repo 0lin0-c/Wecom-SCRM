@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 患者业务：匹配、打标签、改备注描述、图片下载存档、图片OCR识别
+v5修改：handle_patient_matched 中用群B活码替代静态group_link
 """
 import os
 import base64
@@ -19,28 +20,24 @@ from app.database import (
 
 def get_or_create_tag(tag_name, group_name="患者标签"):
     """获取或创建企微标签，返回tag_id"""
-    # 先查本地缓存
     cached = get_cached_tag_id(tag_name)
     if cached:
         return cached
 
-    # 查企微远端
     token = get_wecom_access_token()
+    if not token:
+        return ""
     url = f"https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get_corp_tag_list?access_token={token}"
     resp = requests.post(url, json={"tag_id": [], "group_id": []}).json()
 
     if resp.get("errcode") == 0:
         tag_groups = resp.get("tag_group", [])
-        # 同步所有标签到本地缓存
         save_all_tags_from_remote(tag_groups)
-
-        # 查找目标标签
         for group in tag_groups:
             for tag in group.get("tag", []):
                 if tag.get("name") == tag_name:
                     return tag.get("id", "")
 
-    # 不存在则创建
     url = f"https://qyapi.weixin.qq.com/cgi-bin/externalcontact/add_corp_tag?access_token={token}"
     resp = requests.post(url, json={
         "group_name": group_name,
@@ -74,6 +71,8 @@ def tag_customer(employee_userid, external_userid, tag_names):
         return
 
     token = get_wecom_access_token()
+    if not token:
+        return
     url = f"https://qyapi.weixin.qq.com/cgi-bin/externalcontact/mark_tag?access_token={token}"
     resp = requests.post(url, json={
         "userid": employee_userid,
@@ -87,6 +86,8 @@ def tag_customer(employee_userid, external_userid, tag_names):
 def update_customer_remark_and_desc(employee_userid, external_userid, remark, description):
     """修改客户备注名和描述"""
     token = get_wecom_access_token()
+    if not token:
+        return {"errcode": -1}
     url = f"https://qyapi.weixin.qq.com/cgi-bin/externalcontact/remark?access_token={token}"
     payload = {
         "userid": employee_userid,
@@ -144,9 +145,12 @@ def recognize_image(file_path):
         print(f"[MLLM] 图片识别失败: {e}")
         return ""
 
+
 def download_media(media_id):
     """下载企微临时素材（图片），返回本地文件路径"""
     token = get_wecom_access_token()
+    if not token:
+        return ""
     url = f"https://qyapi.weixin.qq.com/cgi-bin/media/get?access_token={token}&media_id={media_id}"
 
     resp = requests.get(url, stream=True)
@@ -169,15 +173,30 @@ def download_media(media_id):
 
 
 def handle_patient_matched(external_userid, patient_info, open_kfid):
-    """患者匹配成功后的完整处理流程：回复+打标签+改备注+写描述"""
+    """患者匹配成功后的完整处理流程：回复+打标签+改备注+写描述+v5:发群B活码
+
+    v5变化：用群B活码（add_join_way scene=2）替代原来的静态group_link
+    """
     hospital = patient_info['hospital']
     patient_name = patient_info['patient_name']
     plan_type = patient_info['plan_type']
-    group_link = patient_info['group_link']
     plan_content = patient_info['plan_content']
 
-    # 1. 构建回复消息
-    reply = f"已为您匹配信息！您的专属交流群：{group_link}"
+    # 1. 尝试获取群B活码
+    from app.group_b_api import ensure_group_b_live_qr
+    group_b_url = ensure_group_b_live_qr(hospital)
+
+    # 2. 构建回复消息
+    if group_b_url:
+        reply = f"已为您匹配信息！请点击下方链接加入【{hospital}病友交流群】，获取更多资讯：\n{group_b_url}"
+    else:
+        # 没有群B活码，降级用静态group_link
+        group_link = patient_info.get('group_link', '')
+        if group_link:
+            reply = f"已为您匹配信息！您的专属交流群：{group_link}"
+        else:
+            reply = f"已为您匹配信息！暂未开通 {hospital} 的病友交流群，后续会为您开通。"
+
     if plan_type == 'paper':
         reply += "\n\n另外，请您将纸质营养方案拍照发送给我，我们将为您存档。如暂不方便，也可以稍后再发。"
     else:
@@ -186,23 +205,22 @@ def handle_patient_matched(external_userid, patient_info, open_kfid):
     # 先发送回复
     kf_send_msg(external_userid, open_kfid, reply)
 
-    # 2. 更新接待进度
+    # 3. 更新接待进度
     update_reception_patient_info(external_userid, patient_info)
 
-    # 3. KF external_userid 映射为客户联系的 external_userid（优先用 scene 存入的 wob ID）
+    # 4. KF external_userid 映射为客户联系的 external_userid
     contact_ext_id = get_contact_external_userid(external_userid)
 
-    # 4. 获取员工userid
+    # 5. 获取员工userid
     employee_userid = get_employee_userid_for_external(external_userid)
 
-    # 5. 打标签：月份 + 医院
+    # 6. 打标签：月份 + 医院
     now = datetime.now()
     month_tag = f"{now.year}年{now.month}月"
     tag_customer(employee_userid, contact_ext_id, [month_tag, hospital])
 
-    # 6. 改备注：医院全称+建档姓名
+    # 7. 改备注：医院全称+建档姓名
     new_remark = f"{hospital}+{patient_name}"
-    # 7. 写描述
     if plan_type == 'electronic' and plan_content:
         description = f"方案类型：电子方案\n方案内容：{plan_content}"
     elif plan_type == 'paper':
@@ -211,7 +229,7 @@ def handle_patient_matched(external_userid, patient_info, open_kfid):
         description = ""
     update_customer_remark_and_desc(employee_userid, contact_ext_id, new_remark, description)
 
-    print(f"[PATIENT] 匹配完成: {patient_name}({hospital}), 备注={new_remark}")
+    print(f"[PATIENT] 匹配完成: {patient_name}({hospital}), 备注={new_remark}, 群B活码={'有' if group_b_url else '无'}")
 
 
 def handle_paper_plan_image(external_userid, media_id, open_kfid):
@@ -219,19 +237,15 @@ def handle_paper_plan_image(external_userid, media_id, open_kfid):
     row = get_reception_progress_by_external(external_userid)
 
     if row and row[2] == 'paper':
-        # 下载图片
         file_path = download_media(media_id)
         if file_path:
             phone_tail = row[3] or ""
             save_patient_document(external_userid, phone_tail, 'paper_plan', media_id, file_path)
 
-            # 先告诉患者已收到
             kf_send_msg(external_userid, open_kfid, "已收到您的纸质方案照片，正在识别内容...")
 
-            # 用多模态LLM识别图片内容
             plan_text = recognize_image(file_path)
 
-            # KF external_userid 映射为客户联系的 external_userid
             contact_ext_id = get_contact_external_userid(external_userid)
             employee_userid = get_employee_userid_for_external(external_userid)
             patient_name = row[0]
@@ -245,9 +259,16 @@ def handle_paper_plan_image(external_userid, media_id, open_kfid):
 
             update_customer_remark_and_desc(employee_userid, contact_ext_id, remark, description)
 
-            kf_send_msg(external_userid, open_kfid,
-                        "您的纸质方案已识别并存档！如有其他问题请随时联系。" if plan_text
-                        else "您的方案照片已存档，营养师会为您跟进。如有其他问题请随时联系。")
+            # 方案存档后，引导入群B
+            from app.group_b_api import ensure_group_b_live_qr
+            group_b_url = ensure_group_b_live_qr(hospital)
+            if group_b_url:
+                kf_send_msg(external_userid, open_kfid,
+                            f"您的纸质方案已识别并存档！请点击加入【{hospital}病友交流群】：{group_b_url}")
+            else:
+                kf_send_msg(external_userid, open_kfid,
+                            "您的纸质方案已识别并存档！如有其他问题请随时联系。" if plan_text
+                            else "您的方案照片已存档，营养师会为您跟进。如有其他问题请随时联系。")
         else:
             kf_send_msg(external_userid, open_kfid, "图片接收出现问题，请重新发送。")
         return True

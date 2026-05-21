@@ -1,19 +1,44 @@
 # -*- coding: utf-8 -*-
 """
-企业微信 API：access_token、发送消息、同步客户、修改备注
+企业微信 API：access_token（带缓存）、发送消息、同步客户、修改备注
 """
+import time
+import threading
 import sqlite3
 import requests
 from app.config import WECOM_CORP_ID, WECOM_SECRET, WECOM_AGENT_ID
 
+_access_token_cache = {"token": None, "expires_at": 0}
+_access_token_lock = threading.Lock()
+
 
 def get_wecom_access_token():
-    url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={WECOM_CORP_ID}&corpsecret={WECOM_SECRET}"
-    return requests.get(url).json().get("access_token")
+    """获取企微access_token，带缓存（有效期7200秒，提前200秒刷新）"""
+    with _access_token_lock:
+        now = time.time()
+        if _access_token_cache["token"] and now < _access_token_cache["expires_at"]:
+            return _access_token_cache["token"]
+
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={WECOM_CORP_ID}&corpsecret={WECOM_SECRET}"
+        try:
+            resp = requests.get(url, timeout=10).json()
+            token = resp.get("access_token")
+            if token:
+                _access_token_cache["token"] = token
+                _access_token_cache["expires_at"] = now + 7000
+                return token
+            else:
+                print(f"[TOKEN] 获取access_token失败: {resp}")
+                return None
+        except Exception as e:
+            print(f"[TOKEN] 获取access_token异常: {e}")
+            return None
 
 
 def send_welcome_message(welcome_code, message):
     token = get_wecom_access_token()
+    if not token:
+        return {"errcode": -1, "errmsg": "no access token"}
     url = f"https://qyapi.weixin.qq.com/cgi-bin/externalcontact/send_welcome_msg?access_token={token}"
     payload = {"welcome_code": welcome_code, "text": {"content": message}}
     resp = requests.post(url, json=payload).json()
@@ -23,6 +48,8 @@ def send_welcome_message(welcome_code, message):
 
 def send_wecom_message(to_user, content):
     token = get_wecom_access_token()
+    if not token:
+        return
     url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
     requests.post(url, json={
         "touser": to_user,
@@ -34,6 +61,8 @@ def send_wecom_message(to_user, content):
 
 def sync_employee_customers(employee_userid):
     token = get_wecom_access_token()
+    if not token:
+        return f"sync failed: no access token"
     url = f"https://qyapi.weixin.qq.com/cgi-bin/externalcontact/batch/get_by_user?access_token={token}"
 
     cursor_str = ""
@@ -91,6 +120,8 @@ def modify_customer_remark(employee_userid, customer_name, new_remark):
     conn.close()
 
     token = get_wecom_access_token()
+    if not token:
+        return "failed: no access token"
     url = f"https://qyapi.weixin.qq.com/cgi-bin/externalcontact/remark?access_token={token}"
     resp = requests.post(url, json={
         "userid": employee_userid,

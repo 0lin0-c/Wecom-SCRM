@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 数据库：init_db() + 所有 DB 操作函数
+v5新增：group_b, group_b_live_qr 表及相关操作
 """
+import json
 import sqlite3
 
 
@@ -66,6 +68,8 @@ def init_db():
             last_customer_msg_time REAL DEFAULT 0,
             reply_count INTEGER DEFAULT 0,
             service_state INTEGER DEFAULT 0,
+            phone_tail TEXT DEFAULT '',
+            patient_name TEXT DEFAULT '',
             PRIMARY KEY (external_userid, open_kfid)
         )
     ''')
@@ -113,6 +117,48 @@ def init_db():
         )
     ''')
 
+    # ===== v5 新增表 =====
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS group_b (
+            chat_id TEXT PRIMARY KEY,
+            hospital TEXT NOT NULL,
+            chat_name TEXT DEFAULT '',
+            member_count INTEGER DEFAULT 1,
+            max_members INTEGER DEFAULT 200,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS group_b_live_qr (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hospital TEXT NOT NULL,
+            config_id TEXT DEFAULT '',
+            qr_code_url TEXT DEFAULT '',
+            chat_ids TEXT DEFAULT '[]',
+            auto_create_group INTEGER DEFAULT 1,
+            room_base_name TEXT DEFAULT '',
+            room_base_id INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS hospitals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hospital TEXT NOT NULL UNIQUE,
+            room_base_name TEXT DEFAULT '',
+            room_base_id INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # 插入测试数据（仅在表为空时）
     cursor.execute("SELECT COUNT(*) FROM patients")
     if cursor.fetchone()[0] == 0:
@@ -129,7 +175,14 @@ def init_db():
         ''')
         print("[DB] 已插入测试患者数据：张三(8860/电子方案)、李四(5786/纸质方案)")
 
-    # 兼容旧表：确保 reception_progress 有新字段
+    # 插入医院测试数据
+    cursor.execute("SELECT COUNT(*) FROM hospitals")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO hospitals (hospital, room_base_name, room_base_id) VALUES ('北京协和医院', '北京协和医院患者交流', 1)")
+        cursor.execute("INSERT INTO hospitals (hospital, room_base_name, room_base_id) VALUES ('上海瑞金医院', '上海瑞金医院患者交流', 1)")
+        print("[DB] 已插入测试医院数据：北京协和医院、上海瑞金医院")
+
+    # 兼容旧表字段
     _safe_alter(cursor, "ALTER TABLE reception_progress ADD COLUMN patient_name TEXT")
     _safe_alter(cursor, "ALTER TABLE reception_progress ADD COLUMN first_ask_time TEXT")
     _safe_alter(cursor, "ALTER TABLE reception_progress ADD COLUMN second_ask_time TEXT")
@@ -137,6 +190,10 @@ def init_db():
     _safe_alter(cursor, "ALTER TABLE reception_progress ADD COLUMN plan_type TEXT DEFAULT ''")
     _safe_alter(cursor, "ALTER TABLE reception_progress ADD COLUMN group_link TEXT DEFAULT ''")
     _safe_alter(cursor, "ALTER TABLE reception_progress ADD COLUMN contact_external_userid TEXT DEFAULT ''")
+    _safe_alter(cursor, "ALTER TABLE group_b_live_qr ADD COLUMN room_base_name TEXT DEFAULT ''")
+    _safe_alter(cursor, "ALTER TABLE group_b_live_qr ADD COLUMN room_base_id INTEGER DEFAULT 1")
+    _safe_alter(cursor, "ALTER TABLE kf_conversations ADD COLUMN phone_tail TEXT DEFAULT ''")
+    _safe_alter(cursor, "ALTER TABLE kf_conversations ADD COLUMN patient_name TEXT DEFAULT ''")
 
     conn.commit()
     conn.close()
@@ -197,7 +254,7 @@ def get_kf_conversation(external_userid, open_kfid):
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT last_customer_msg_time, reply_count FROM kf_conversations WHERE external_userid=? AND open_kfid=?",
+        "SELECT last_customer_msg_time, reply_count, phone_tail, patient_name FROM kf_conversations WHERE external_userid=? AND open_kfid=?",
         (external_userid, open_kfid)
     )
     row = cursor.fetchone()
@@ -222,6 +279,28 @@ def update_kf_service_state(external_userid, open_kfid, state):
     cursor.execute(
         "UPDATE kf_conversations SET service_state=? WHERE external_userid=? AND open_kfid=?",
         (state, external_userid, open_kfid)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_kf_phone_tail(external_userid, open_kfid, phone_tail):
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE kf_conversations SET phone_tail=? WHERE external_userid=? AND open_kfid=?",
+        (phone_tail, external_userid, open_kfid)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_kf_patient_name(external_userid, open_kfid, patient_name):
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE kf_conversations SET patient_name=? WHERE external_userid=? AND open_kfid=?",
+        (patient_name, external_userid, open_kfid)
     )
     conn.commit()
     conn.close()
@@ -268,7 +347,6 @@ def update_reception_patient_info(external_userid, patient_info):
 
 
 def insert_reception_on_kf_enter(external_userid, contact_ext_id=""):
-    """KF enter_session 时初始化接待记录，contact_ext_id 为从 scene 获取的 wob ID"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -276,7 +354,6 @@ def insert_reception_on_kf_enter(external_userid, contact_ext_id=""):
         (external_userid, status, add_time, welcome_sent, first_ask_time, follow_up_count, contact_external_userid)
         VALUES (?, 'in_progress', datetime('now'), 1, datetime('now'), 0, ?)
     ''', (external_userid, contact_ext_id))
-    # 如果记录已存在，更新 first_ask_time 和 contact_external_userid
     cursor.execute('''
         UPDATE reception_progress SET first_ask_time = COALESCE(first_ask_time, datetime('now'))
         WHERE external_userid = ? AND first_ask_time IS NULL
@@ -291,7 +368,6 @@ def insert_reception_on_kf_enter(external_userid, contact_ext_id=""):
 
 
 def insert_reception_on_phone_tail(external_userid, phone_tail, patient_info=None):
-    """收到手机尾号时更新或创建接待记录"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     if patient_info:
@@ -319,7 +395,6 @@ def insert_reception_on_phone_tail(external_userid, phone_tail, patient_info=Non
 # ================= Scene 映射操作 =================
 
 def save_scene_mapping(contact_external_userid):
-    """存储客户联系 external_userid，返回自增 ID（用于嵌入 scene，解决 32 字符限制）"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -332,7 +407,6 @@ def save_scene_mapping(contact_external_userid):
 
 
 def get_scene_mapping(scene_id):
-    """通过 scene 中的 ID 查找对应的客户联系 external_userid"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute("SELECT contact_external_userid FROM scene_mapping WHERE id = ?", (scene_id,))
@@ -343,25 +417,28 @@ def get_scene_mapping(scene_id):
 
 # ================= 患者信息操作 =================
 
-def match_patient(phone_tail):
-    """用手机尾号查询患者信息，多条取最新"""
+def match_patient(phone_tail, patient_name=""):
+    """根据手机尾号和姓名匹配患者。姓名为空时仅按尾号匹配"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT patient_name, phone_tail, hospital, plan_type, plan_content, group_link
-        FROM patients WHERE phone_tail = ?
-        ORDER BY created_at DESC LIMIT 1
-    ''', (phone_tail,))
+    if patient_name:
+        cursor.execute('''
+            SELECT patient_name, phone_tail, hospital, plan_type, plan_content, group_link
+            FROM patients WHERE phone_tail = ? AND patient_name = ?
+            ORDER BY created_at DESC LIMIT 1
+        ''', (phone_tail, patient_name))
+    else:
+        cursor.execute('''
+            SELECT patient_name, phone_tail, hospital, plan_type, plan_content, group_link
+            FROM patients WHERE phone_tail = ?
+            ORDER BY created_at DESC LIMIT 1
+        ''', (phone_tail,))
     row = cursor.fetchone()
     conn.close()
     if row:
         return {
-            "patient_name": row[0],
-            "phone_tail": row[1],
-            "hospital": row[2],
-            "plan_type": row[3],
-            "plan_content": row[4],
-            "group_link": row[5]
+            "patient_name": row[0], "phone_tail": row[1], "hospital": row[2],
+            "plan_type": row[3], "plan_content": row[4], "group_link": row[5]
         }
     return None
 
@@ -378,7 +455,6 @@ def save_patient_document(external_userid, phone_tail, doc_type, media_id, file_
 
 
 def get_patient_context_for_prompt(external_userid):
-    """查询患者匹配信息，用于动态构建AI system prompt"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -393,9 +469,6 @@ def get_patient_context_for_prompt(external_userid):
 
 
 def get_contact_external_userid(kf_external_userid):
-    """获取 KF external_userid 对应的客户联系 external_userid (wob ID)
-    优先用 scene 存入的 contact_external_userid，其次用映射函数
-    """
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute("SELECT contact_external_userid FROM reception_progress WHERE external_userid = ?", (kf_external_userid,))
@@ -403,12 +476,10 @@ def get_contact_external_userid(kf_external_userid):
     conn.close()
     if row and row[0]:
         return row[0]
-    # 没有存过，用映射函数兜底
     return resolve_contact_external_userid(kf_external_userid)
 
 
 def get_employee_userid_for_external(external_userid):
-    """查询某个外部联系人对应的员工userid"""
     from app.config import DEFAULT_EMPLOYEE_USERID
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
@@ -426,46 +497,30 @@ def get_employee_userid_for_external(external_userid):
 
 
 def resolve_contact_external_userid(kf_external_userid):
-    """将 KF 的 external_userid (wmb开头) 映射为客户联系的 external_userid (wob开头)
-    
-    KF 和客户联系使用不同的 external_userid 体系：
-    - KF: wmb 开头，用于 kf/send_msg 等
-    - 客户联系: wob 开头，用于 externalcontact/remark、mark_tag 等
-    
-    映射方式：
-    1. 按 patients 表的手机尾号→患者姓名→customers 表匹配
-    2. 按 reception_progress 的患者姓名→customers 表匹配
-    3. 按 customers 表的 remark 字段模糊匹配
-    4. 遍历所有员工的外部联系人列表匹配
-    """
+    """将 KF 的 external_userid (wmb开头) 映射为客户联系的 external_userid (wob开头)"""
     import requests
     from app.wechat_api import get_wecom_access_token
     from app.config import DEFAULT_EMPLOYEE_USERID
 
-    # 如果已经是 wob 开头，直接返回
     if kf_external_userid.startswith('wob'):
         return kf_external_userid
 
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
 
-    # 方式1：从 reception_progress 查手机尾号 → patients 表查姓名 → customers 匹配
     cursor.execute("SELECT phone_tail, patient_name FROM reception_progress WHERE external_userid = ?", (kf_external_userid,))
     row = cursor.fetchone()
     phone_tail = row[0] if row else None
     patient_name = row[1] if row else None
 
-    # 用手机尾号从 patients 表查真实的患者姓名
     if phone_tail:
         cursor.execute("SELECT patient_name FROM patients WHERE phone_tail = ? ORDER BY created_at DESC LIMIT 1", (phone_tail,))
         pt_row = cursor.fetchone()
         if pt_row:
             patient_name = pt_row[0]
-            # 同步更新 reception_progress
             cursor.execute("UPDATE reception_progress SET patient_name = ? WHERE external_userid = ?", (patient_name, kf_external_userid))
             conn.commit()
 
-    # 方式2：用患者姓名在 customers 表里匹配（customer_name 或 remark）
     if patient_name:
         cursor.execute("SELECT external_userid, employee_userid FROM customers WHERE customer_name = ? OR remark = ?",
                        (patient_name, patient_name))
@@ -475,7 +530,6 @@ def resolve_contact_external_userid(kf_external_userid):
             print(f"[MAPPING] KF {kf_external_userid} -> 客户联系 {cust_row[0]} (by name: {patient_name})")
             return cust_row[0]
 
-    # 方式3：用备注模糊匹配（patients 表的姓名可能和 customers 的 remark 部分匹配）
     if patient_name:
         cursor.execute("SELECT external_userid, employee_userid FROM customers WHERE customer_name LIKE ? OR remark LIKE ?",
                        (f"%{patient_name}%", f"%{patient_name}%"))
@@ -487,7 +541,6 @@ def resolve_contact_external_userid(kf_external_userid):
 
     conn.close()
 
-    # 方式4：遍历默认员工的外部联系人列表
     token = get_wecom_access_token()
     url = f"https://qyapi.weixin.qq.com/cgi-bin/externalcontact/batch/get_by_user?access_token={token}"
     resp = requests.post(url, json={"userid_list": [DEFAULT_EMPLOYEE_USERID], "limit": 100}).json()
@@ -511,15 +564,12 @@ def resolve_contact_external_userid(kf_external_userid):
 
 
 def get_customer_by_name_or_remark(employee_userid, customer_name):
-    """按姓名或备注查找客户，返回 (external_userid, customer_name, remark)"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
-    # 精确匹配
     cursor.execute("SELECT external_userid, customer_name, remark FROM customers WHERE employee_userid=? AND (customer_name=? OR remark=?)",
                    (employee_userid, customer_name, customer_name))
     row = cursor.fetchone()
     if not row:
-        # 模糊匹配
         cursor.execute("SELECT external_userid, customer_name, remark FROM customers WHERE employee_userid=? AND (customer_name LIKE ? OR remark LIKE ?)",
                        (employee_userid, f"%{customer_name}%", f"%{customer_name}%"))
         row = cursor.fetchone()
@@ -528,7 +578,6 @@ def get_customer_by_name_or_remark(employee_userid, customer_name):
 
 
 def get_reception_progress_by_external(external_userid):
-    """查询接待进度记录"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -542,7 +591,6 @@ def get_reception_progress_by_external(external_userid):
 
 
 def get_pending_follow_ups():
-    """查询需要跟进的记录"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -557,7 +605,6 @@ def get_pending_follow_ups():
 
 
 def update_follow_up(external_userid, follow_up_count, second_ask_time=None):
-    """更新跟进状态"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     if second_ask_time:
@@ -577,7 +624,6 @@ def update_follow_up(external_userid, follow_up_count, second_ask_time=None):
 
 
 def mark_no_response(external_userid):
-    """标记为未回复"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -590,7 +636,6 @@ def mark_no_response(external_userid):
 
 
 def get_no_response_today():
-    """查询今天标记为未回复的记录"""
     from datetime import datetime
     today_start = datetime.now().strftime("%Y-%m-%d") + " 00:00:00"
     conn = sqlite3.connect('wecom_cache.db')
@@ -606,7 +651,6 @@ def get_no_response_today():
 
 
 def get_customer_remark(external_userid):
-    """查询客户的备注和姓名"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
     cursor.execute("SELECT remark, customer_name FROM customers WHERE external_userid = ?", (external_userid,))
@@ -638,20 +682,15 @@ def save_tag_cache(tag_id, tag_name, group_id, group_name):
 
 
 def save_all_tags_from_remote(tag_groups):
-    """从远端同步所有标签到本地缓存"""
     conn = sqlite3.connect('wecom_cache.db')
     cursor = conn.cursor()
-    found_tag_id = None
     for group in tag_groups:
         for tag in group.get("tag", []):
-            tag_id = tag.get("id", "")
-            tag_n = tag.get("name", "")
-            grp_id = group.get("group_id", "")
-            grp_name = group.get("group_name", "")
             cursor.execute('''
                 INSERT OR REPLACE INTO corp_tags (tag_id, tag_name, group_id, group_name, updated_at)
                 VALUES (?, ?, ?, ?, datetime('now'))
-            ''', (tag_id, tag_n, grp_id, grp_name))
+            ''', (tag.get("id", ""), tag.get("name", ""),
+                  group.get("group_id", ""), group.get("group_name", "")))
     conn.commit()
     conn.close()
 
@@ -679,6 +718,140 @@ def get_chat_history(external_userid, open_kfid, limit=20):
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+
+# ================= 群B操作（v5新增）=================
+
+def save_group_b(chat_id, hospital, chat_name="", member_count=1):
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO group_b (chat_id, hospital, chat_name, member_count, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+    ''', (chat_id, hospital, chat_name, member_count))
+    conn.commit()
+    conn.close()
+
+
+def get_group_b_by_hospital(hospital):
+    """查找某医院的所有群B"""
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_id, hospital, chat_name, member_count FROM group_b WHERE hospital = ? AND status = 'active'",
+                   (hospital,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_group_b_available(hospital):
+    """获取某医院当前可用的群B（未满200人的）"""
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_id, hospital, chat_name, member_count FROM group_b WHERE hospital = ? AND status = 'active' AND member_count < 200 ORDER BY member_count ASC",
+                   (hospital,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def refresh_group_b_member_count(chat_id):
+    """从企微API同步群B的真实成员数"""
+    from app.group_b_api import get_customer_group_chat
+    resp = get_customer_group_chat(chat_id)
+    if resp.get("errcode") == 0:
+        member_list = resp.get("group_chat", {}).get("member_list", [])
+        real_count = len(member_list)
+        conn = sqlite3.connect('wecom_cache.db')
+        cursor = conn.cursor()
+        cursor.execute("UPDATE group_b SET member_count = ?, updated_at = datetime('now') WHERE chat_id = ?",
+                       (real_count, chat_id))
+        conn.commit()
+        conn.close()
+        return real_count
+    return None
+
+
+def save_group_b_live_qr(hospital, config_id, qr_code_url, chat_ids, room_base_name="", room_base_id=1):
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO group_b_live_qr (hospital, config_id, qr_code_url, chat_ids, room_base_name, room_base_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    ''', (hospital, config_id, qr_code_url, json.dumps(chat_ids) if isinstance(chat_ids, list) else chat_ids,
+          room_base_name, room_base_id))
+    conn.commit()
+    conn.close()
+
+
+def get_group_b_live_qr(hospital):
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, hospital, config_id, qr_code_url, chat_ids, status FROM group_b_live_qr WHERE hospital = ? AND status = 'active'",
+                   (hospital,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "id": row[0], "hospital": row[1], "config_id": row[2],
+            "qr_code_url": row[3], "chat_ids": json.loads(row[4]) if row[4] else [],
+            "status": row[5]
+        }
+    return None
+
+
+def update_group_b_live_qr_chat_ids(config_id, chat_ids):
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute("UPDATE group_b_live_qr SET chat_ids = ?, updated_at = datetime('now') WHERE config_id = ?",
+                   (json.dumps(chat_ids), config_id))
+    conn.commit()
+    conn.close()
+
+
+# ================= 医院管理操作 =================
+
+def get_all_hospitals():
+    """获取所有医院列表（H5下拉用）"""
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, hospital, room_base_name, room_base_id FROM hospitals WHERE status = 'active' ORDER BY hospital")
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"id": r[0], "hospital": r[1], "room_base_name": r[2], "room_base_id": r[3]} for r in rows]
+
+
+def get_hospital_by_name(hospital):
+    """获取单个医院信息"""
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, hospital, room_base_name, room_base_id FROM hospitals WHERE hospital = ? AND status = 'active'", (hospital,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"id": row[0], "hospital": row[1], "room_base_name": row[2], "room_base_id": row[3]}
+    return None
+
+
+def save_hospital(hospital, room_base_name="", room_base_id=1):
+    """保存或更新医院信息（upsert）"""
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO hospitals (hospital, room_base_name, room_base_id, status, created_at)
+        VALUES (?, ?, ?, 'active', COALESCE((SELECT created_at FROM hospitals WHERE hospital = ?), datetime('now')))
+    ''', (hospital, room_base_name or f"{hospital}患者交流", room_base_id, hospital))
+    conn.commit()
+    conn.close()
+
+
+def delete_hospital(hospital):
+    """软删除医院"""
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    cursor.execute("UPDATE hospitals SET status = 'inactive' WHERE hospital = ?", (hospital,))
+    conn.commit()
+    conn.close()
 
 
 # 初始化数据库

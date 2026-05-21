@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>千院千群 - 群管理后台</title>
+    <script src="https://wwcdn.weixin.qq.com/node/wework/wwopen/js/wecom-jssdk-2.4.0.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+               padding: 16px; background: #f5f5f5; color: #333; }
+        h1 { text-align: center; margin-bottom: 16px; font-size: 18px; color: #333; }
+
+        /* 主布局：左右分栏 */
+        .main { display: flex; gap: 16px; max-width: 900px; margin: 0 auto; }
+        .panel { background: #fff; border-radius: 8px; padding: 16px; }
+        .panel-left { flex: 0 0 280px; }
+        .panel-right { flex: 1; min-width: 0; }
+
+        /* 移动端竖屏上下排列 */
+        @media (max-width: 640px) {
+            .main { flex-direction: column; }
+            .panel-left { flex: none; }
+        }
+
+        /* 通用组件 */
+        .section-title { font-size: 15px; font-weight: 600; margin-bottom: 12px;
+                         padding-bottom: 8px; border-bottom: 1px solid #eee; }
+        .form-group { margin-bottom: 12px; }
+        label { display: block; margin-bottom: 4px; font-size: 13px; color: #666; }
+        select, input[type="text"] { width: 100%; padding: 8px 10px; border: 1px solid #ddd;
+                                      border-radius: 6px; font-size: 14px; background: #fff; }
+        button { padding: 10px 16px; border: none; border-radius: 6px; font-size: 14px;
+                 cursor: pointer; font-weight: 500; }
+        .btn-primary { background: #07c160; color: #fff; width: 100%; }
+        .btn-primary:disabled { background: #ccc; cursor: not-allowed; }
+        .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 4px; }
+        .btn-add { background: #e8f5e9; color: #07c160; border: 1px solid #07c160; }
+        .btn-del { background: #fff; color: #999; border: 1px solid #ddd; margin-left: 6px; }
+        .btn-copy { background: #1989fa; color: #fff; margin-left: 8px; }
+
+        /* 消息提示 */
+        .msg { margin-top: 10px; padding: 10px; border-radius: 6px; font-size: 13px;
+               line-height: 1.5; display: none; word-break: break-all; }
+        .msg.success { display: block; border: 1px solid #07c160; color: #333; background: #f0fff0; }
+        .msg.error { display: block; border: 1px solid #fa5151; color: #fa5151; background: #fff0f0; }
+        .msg.info { display: block; border: 1px solid #1989fa; color: #1989fa; background: #f0f8ff; }
+
+        /* 医院列表 */
+        .hospital-item { display: flex; align-items: center; justify-content: space-between;
+                         padding: 6px 0; font-size: 14px; }
+        .hospital-item .name { flex: 1; }
+
+        /* 群列表 */
+        .group-card { padding: 10px; margin-bottom: 8px; background: #fafafa;
+                      border-radius: 6px; border: 1px solid #eee; }
+        .group-card .group-name { font-size: 14px; font-weight: 500; margin-bottom: 6px; }
+        .group-card .group-meta { font-size: 12px; color: #999; }
+        .progress-bar { height: 6px; background: #e8e8e8; border-radius: 3px; margin-top: 6px; overflow: hidden; }
+        .progress-bar .fill { height: 100%; border-radius: 3px; transition: width .3s; }
+        .fill-green { background: #07c160; }
+        .fill-orange { background: #ff9800; }
+        .fill-red { background: #fa5151; }
+
+        /* 活码区域 */
+        .qr-section { margin-top: 16px; padding-top: 12px; border-top: 1px solid #eee; }
+        .qr-section .section-title { margin-bottom: 8px; }
+        .qr-img { max-width: 160px; border: 1px solid #eee; border-radius: 4px; }
+        .qr-link { display: flex; align-items: center; margin-top: 8px; font-size: 12px;
+                    color: #666; word-break: break-all; }
+        .qr-link span { flex: 1; }
+
+        .empty { text-align: center; padding: 24px; color: #999; font-size: 14px; }
+
+        /* 调试日志 */
+        .debug { margin-top: 12px; padding: 10px; background: #fffbe8; border: 1px solid #ffe58f;
+                 border-radius: 6px; font-size: 11px; color: #8c6900; line-height: 1.6;
+                 max-height: 200px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <h1>千院千群 - 群管理后台</h1>
+    <div class="main">
+        <!-- 左栏：新建群 + 医院管理 -->
+        <div class="panel panel-left">
+            <div class="section-title">新建群</div>
+            <div class="form-group">
+                <label for="hospital">选择医院</label>
+                <select id="hospital">
+                    <option value="">-- 请选择医院 --</option>
+                </select>
+            </div>
+            <button id="createBtn" class="btn-primary" disabled onclick="createGroup()">一键建群</button>
+            <div id="createMsg" class="msg"></div>
+
+            <div class="section-title" style="margin-top:20px;">医院管理</div>
+            <div class="form-group" style="display:flex;gap:6px;">
+                <input type="text" id="newHospital" placeholder="输入医院名称">
+                <button class="btn-sm btn-add" onclick="addHospital()">添加</button>
+            </div>
+            <div id="hospitalList"></div>
+        </div>
+
+        <!-- 右栏：群列表 + 活码 -->
+        <div class="panel panel-right">
+            <div class="section-title">群列表 &amp; 活码</div>
+            <div id="groupContent">
+                <div class="empty">请先选择医院</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="debug" class="debug" style="display:block;max-width:900px;margin:12px auto 0;max-height:400px;"></div>
+
+    <script>
+        const API_BASE = '';
+        let toolPersonExternalId = '';
+        let secondEmployeeId = '';
+        let employeeUserId = '';
+        let jsdkReady = false;
+
+        function debugLog(msg) {
+            const div = document.getElementById('debug');
+            const time = new Date().toLocaleTimeString();
+            div.innerHTML += `<div>[${time}] ${msg}</div>`;
+            div.scrollTop = div.scrollHeight;
+            console.log('[DEBUG]', msg);
+            // 上报到服务端
+            try {
+                fetch(`${API_BASE}/api/log`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({time: time, msg: msg})
+                });
+            } catch(e) {}
+        }
+
+        function showMsg(el, type, msg) {
+            el.className = `msg ${type}`;
+            el.textContent = msg;
+        }
+
+        // ====== JS-SDK 初始化 ======
+        async function initJSSDK() {
+            debugLog('开始JS-SDK初始化...');
+            try {
+                const currentUrl = window.location.href.split('#')[0];
+                const url = encodeURIComponent(currentUrl);
+                const resp = await fetch(`${API_BASE}/api/jsapi/signature?url=${url}`);
+                const data = await resp.json();
+
+                if (data.errcode !== 0) {
+                    debugLog('签名失败: ' + JSON.stringify(data));
+                    return;
+                }
+
+                try {
+                    await ww.register({
+                        corpId: data.corpId,
+                        agentId: data.agentId,
+                        jsApiList: ['openEnterpriseChat', 'selectExternalContact'],
+                        getConfigSignature() {
+                            return { timestamp: data.timestamp, nonceStr: data.nonceStr, signature: data.configSignature };
+                        },
+                        getAgentConfigSignature() {
+                            return { timestamp: data.timestamp, nonceStr: data.nonceStr, signature: data.agentConfigSignature };
+                        }
+                    });
+                    debugLog('ww.register() 完成');
+                } catch (regErr) {
+                    debugLog('ww.register异常: ' + (regErr.errMsg || regErr.message || JSON.stringify(regErr)));
+                }
+
+                jsdkReady = true;
+            } catch (e) {
+                debugLog('initJSSDK异常: ' + e.message);
+            }
+        }
+
+        // ====== 医院下拉 & 列表 ======
+        async function loadHospitals() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/hospitals`);
+                const data = await resp.json();
+                const hospitals = data.hospitals || [];
+
+                // 下拉框
+                const select = document.getElementById('hospital');
+                const curVal = select.value;
+                select.innerHTML = '<option value="">-- 请选择医院 --</option>';
+                hospitals.forEach(h => {
+                    const opt = document.createElement('option');
+                    opt.value = h.hospital;
+                    opt.textContent = h.hospital;
+                    select.appendChild(opt);
+                });
+                if (curVal) select.value = curVal;
+
+                // 医院管理列表
+                const list = document.getElementById('hospitalList');
+                list.innerHTML = '';
+                hospitals.forEach(h => {
+                    const div = document.createElement('div');
+                    div.className = 'hospital-item';
+                    div.innerHTML = `<span class="name">${h.hospital}</span>
+                        <button class="btn-sm btn-del" onclick="deleteHospital('${h.hospital}')">删除</button>`;
+                    list.appendChild(div);
+                });
+
+                debugLog('加载医院: ' + hospitals.length + '个');
+            } catch (e) {
+                debugLog('加载医院失败: ' + e.message);
+            }
+        }
+
+        async function addHospital() {
+            const input = document.getElementById('newHospital');
+            const name = input.value.trim();
+            if (!name) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/hospital/manage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'add', hospital: name })
+                });
+                const data = await resp.json();
+                if (data.errcode === 0) {
+                    input.value = '';
+                    await loadHospitals();
+                    debugLog('添加医院成功: ' + name);
+                } else {
+                    debugLog('添加医院失败: ' + data.errmsg);
+                }
+            } catch (e) {
+                debugLog('添加医院异常: ' + e.message);
+            }
+        }
+
+        async function deleteHospital(name) {
+            if (!confirm('确认删除医院"' + name +'"？已建的群不会被删除。')) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/hospital/manage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'delete', hospital: name })
+                });
+                const data = await resp.json();
+                if (data.errcode === 0) {
+                    await loadHospitals();
+                    // 如果删的是当前选中的医院，清空右侧
+                    if (document.getElementById('hospital').value === name) {
+                        document.getElementById('groupContent').innerHTML = '<div class="empty">请先选择医院</div>';
+                    }
+                    debugLog('删除医院成功: ' + name);
+                } else {
+                    debugLog('删除医院失败: ' + data.errmsg);
+                }
+            } catch (e) {
+                debugLog('删除医院异常: ' + e.message);
+            }
+        }
+
+        // ====== 加载配置 ======
+        async function loadConfig() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/config`);
+                const data = await resp.json();
+                toolPersonExternalId = data.tool_person_external_userid || '';
+                employeeUserId = data.employee_userid || '';
+                secondEmployeeId = data.second_employee_userid || '';
+                debugLog('工具人ID: ' + (toolPersonExternalId || '未配置'));
+                debugLog('员工1: ' + (employeeUserId || '未配置'));
+                debugLog('员工2: ' + (secondEmployeeId || '未配置'));
+            } catch (e) {
+                debugLog('加载配置失败: ' + e.message);
+            }
+        }
+
+        // ====== 群列表 & 活码 ======
+        async function loadGroupList(hospital) {
+            const container = document.getElementById('groupContent');
+            if (!hospital) {
+                container.innerHTML = '<div class="empty">请先选择医院</div>';
+                return;
+            }
+            try {
+                const resp = await fetch(`${API_BASE}/api/group/list?hospital=${encodeURIComponent(hospital)}`);
+                const data = await resp.json();
+                const groups = data.groups || [];
+                const liveQr = data.live_qr;
+
+                if (groups.length === 0 && !liveQr) {
+                    container.innerHTML = `<div class="empty">该医院暂无群，点击左侧"一键建群"创建</div>`;
+                    return;
+                }
+
+                let html = '';
+
+                // 群列表
+                if (groups.length > 0) {
+                    html += `<div style="margin-bottom:4px;font-size:13px;color:#666;">共 ${groups.length} 个群</div>`;
+                    groups.forEach(g => {
+                        const pct = Math.round(g.member_count / 200 * 100);
+                        let fillClass = 'fill-green';
+                        if (pct > 80) fillClass = 'fill-orange';
+                        if (pct >= 100) fillClass = 'fill-red';
+                        html += `<div class="group-card">
+                            <div class="group-name">${g.chat_name || g.chat_id}</div>
+                            <div class="group-meta">成员 ${g.member_count}/200</div>
+                            <div class="progress-bar"><div class="fill ${fillClass}" style="width:${Math.min(pct,100)}%"></div></div>
+                        </div>`;
+                    });
+                }
+
+                // 活码
+                if (liveQr && liveQr.qr_code_url) {
+                    html += `<div class="qr-section">
+                        <div class="section-title">入群活码</div>
+                        <img class="qr-img" src="${liveQr.qr_code_url}" alt="入群活码">
+                        <div class="qr-link">
+                            <span>${liveQr.qr_code_url}</span>
+                            <button class="btn-sm btn-copy" onclick="copyText('${liveQr.qr_code_url}')">复制链接</button>
+                        </div>
+                    </div>`;
+                }
+
+                container.innerHTML = html;
+            } catch (e) {
+                debugLog('加载群列表失败: ' + e.message);
+                container.innerHTML = '<div class="empty">加载失败</div>';
+            }
+        }
+
+        function copyText(text) {
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText(text).then(() => {
+                    debugLog('已复制到剪贴板');
+                }).catch(() => fallbackCopy(text));
+            } else {
+                fallbackCopy(text);
+            }
+        }
+
+        function fallbackCopy(text) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            debugLog('已复制到剪贴板(fallback)');
+        }
+
+        // ====== 创建群 ======
+        async function createGroup() {
+            const hospital = document.getElementById('hospital').value;
+            if (!hospital) return;
+
+            const btn = document.getElementById('createBtn');
+            btn.disabled = true;
+            btn.textContent = '创建中...';
+
+            // 根据右侧已有群数量自动编号
+            const existingCards = document.querySelectorAll('.group-name');
+            let groupNum = existingCards.length + 1;
+            const groupName = `${hospital}患者交流${groupNum}群`;
+
+            try {
+                // 先用 selectExternalContact 选择外部联系人（openEnterpriseChat要求ID必须通过此接口获取）
+                debugLog('调用 selectExternalChat 选择外部联系人...');
+                let selectedExtIds = [];
+                try {
+                    const selectResult = await ww.selectExternalContact({
+                        filter: 0,  // 0=全部外部联系人
+                        maxCount: 1
+                    });
+                    debugLog('selectExternalContact返回: ' + JSON.stringify(selectResult));
+                    if (selectResult && selectResult.userIds && selectResult.userIds.length > 0) {
+                        selectedExtIds = selectResult.userIds;
+                        debugLog('选择的外部联系人: ' + JSON.stringify(selectedExtIds));
+                    } else {
+                        debugLog('未选择外部联系人，使用配置的工具人ID');
+                        selectedExtIds = [toolPersonExternalId];
+                    }
+                } catch (selectErr) {
+                    debugLog('selectExternalContact异常: ' + (selectErr.errMsg || selectErr.message || JSON.stringify(selectErr)));
+                    selectedExtIds = [toolPersonExternalId];
+                }
+
+                // 2个企业成员 + 外部联系人 = 满足创建群聊条件
+                let userIds = [employeeUserId];
+                if (secondEmployeeId) {
+                    userIds.push(secondEmployeeId);
+                }
+                debugLog('建群参数: groupName=' + groupName + ', userIds=' + JSON.stringify(userIds) + ', externalUserIds=' + JSON.stringify(selectedExtIds));
+
+                const result = await ww.openEnterpriseChat({
+                    groupName: groupName,
+                    userIds: userIds,
+                    externalUserIds: selectedExtIds
+                });
+                debugLog('openEnterpriseChat返回: ' + JSON.stringify(result));
+
+                if (result && result.chatId) {
+                    debugLog('获取到chatId: ' + result.chatId);
+                    await registerGroup(result.chatId, hospital);
+                } else {
+                    debugLog('未获取chatId，等待系统自动注册...');
+                    showMsg(document.getElementById('createMsg'), 'info', '群已创建！系统正在自动生成入群活码...');
+                    await pollForQR(hospital);
+                }
+            } catch (err) {
+                const errMsg = err.errMsg || err.message || JSON.stringify(err);
+                debugLog('建群异常: ' + errMsg);
+
+                if (errMsg.includes('cancel') || errMsg.includes('取消')) {
+                    showMsg(document.getElementById('createMsg'), 'info', '已取消建群');
+                } else {
+                    debugLog('建群报错但尝试轮询活码...');
+                    showMsg(document.getElementById('createMsg'), 'info', '请稍候，系统正在检查是否建群成功...');
+                    await pollForQR(hospital);
+                }
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '一键建群';
+            }
+        }
+
+        async function registerGroup(chatId, hospital) {
+            try {
+                const resp = await fetch(`${API_BASE}/api/group/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: chatId, hospital: hospital })
+                });
+                const data = await resp.json();
+                if (data.errcode === 0) {
+                    showMsg(document.getElementById('createMsg'), 'success', '建群成功！活码已生成。');
+                    await loadGroupList(hospital);
+                } else {
+                    showMsg(document.getElementById('createMsg'), 'error', '活码生成失败：' + data.errmsg);
+                }
+            } catch (e) {
+                showMsg(document.getElementById('createMsg'), 'error', '注册失败：' + e.message);
+            }
+        }
+
+        async function pollForQR(hospital) {
+            const maxAttempts = 12;
+            const interval = 5000;
+            for (let i = 0; i < maxAttempts; i++) {
+                await new Promise(r => setTimeout(r, interval));
+                try {
+                    const resp = await fetch(`${API_BASE}/api/group/check_qr?hospital=${encodeURIComponent(hospital)}`);
+                    const data = await resp.json();
+                    if (data.qr_code) {
+                        showMsg(document.getElementById('createMsg'), 'success', '建群成功！活码已生成。');
+                        await loadGroupList(hospital);
+                        return;
+                    }
+                } catch (e) { /* continue */ }
+            }
+            showMsg(document.getElementById('createMsg'), 'info', '系统仍在处理中，请稍后刷新查看。');
+        }
+
+        // ====== 初始化 ======
+        (async () => {
+            debugLog('页面初始化 v2 (2026-05-13)');
+            await Promise.all([initJSSDK(), loadHospitals(), loadConfig()]);
+
+            // 医院选择变更事件
+            const select = document.getElementById('hospital');
+            select.addEventListener('change', () => {
+                document.getElementById('createBtn').disabled = !select.value;
+                loadGroupList(select.value);
+            });
+
+            debugLog('初始化完成');
+        })();
+    </script>
+</body>
+</html>

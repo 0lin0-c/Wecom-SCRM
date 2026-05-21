@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 AI 对话：chat_with_ai_and_execute()、chat_with_kf_ai()
+v5修改：员工对话新增群B管理工具（创建群B、发通知、查看群列表）
+千院千群新增：add_hospital 工具、更新 create_group_b 引导至H5侧边栏
 """
 import json
 import sqlite3
@@ -20,13 +22,9 @@ from app.database import (
 
 
 def _get_kf_link(employee_userid, customer_name=None):
-    """获取微信客服链接，scene 嵌入映射 ID 以便自动关联 wob ID
-    scene 格式: "员工ID" 或 "员工ID_映射ID"（映射ID 对应 scene_mapping 表中的 wob ID）
-    scene 限制 32 字符，所以不能直接放 wob ID
-    """
+    """获取微信客服链接"""
     scene = employee_userid
 
-    # 如果指定了客户名，查找其 external_userid 并存入映射表，scene 放短 ID
     if customer_name:
         cust = get_customer_by_name_or_remark(employee_userid, customer_name)
         if cust and cust[0] and (cust[0].startswith('wob') or cust[0].startswith('wm')):
@@ -44,8 +42,112 @@ def _get_kf_link(employee_userid, customer_name=None):
         return f"获取客服链接失败：{result.get('errmsg', '未知错误')}"
 
 
+# ================= 员工群B管理工具 =================
+
+def _tool_add_hospital(args):
+    """tool: 添加医院到系统"""
+    hospital = args.get("hospital", "")
+    if not hospital:
+        return "请指定医院名称"
+
+    from app.database import save_hospital, get_hospital_by_name
+    existing = get_hospital_by_name(hospital)
+    if existing:
+        return f"{hospital} 已存在，无需重复添加。群名前缀：{existing.get('room_base_name', '')}"
+
+    room_base_name = f"{hospital}患者交流"
+    save_hospital(hospital, room_base_name=room_base_name, room_base_id=1)
+    return f"已添加医院「{hospital}」，群名前缀：{room_base_name}。员工可在侧边栏「一键建群」工具中看到该医院。"
+
+
+def _tool_create_group_b(employee_userid, args):
+    """tool: 为医院创建群B"""
+    hospital = args.get("hospital", "")
+    if not hospital:
+        return "请指定医院名称"
+
+    from app.group_b_api import discover_and_register_groups, ensure_group_b_live_qr
+    from app.database import get_group_b_by_hospital, save_hospital
+    from app.config import H5_BASE_URL
+
+    # 确保医院在 hospitals 表中
+    save_hospital(hospital)
+
+    # 先尝试发现已有的群
+    discover_and_register_groups()
+
+    existing = get_group_b_by_hospital(hospital)
+    if existing:
+        group_names = [row[2] for row in existing]
+        qr_url = ensure_group_b_live_qr(hospital)
+        qr_info = f"\n\n入群活码：{qr_url}" if qr_url else "\n\n活码生成中，请稍后再试。"
+        return f"{hospital} 已有群B：{', '.join(group_names)}。{qr_info}"
+
+    # 没有群，引导员工使用H5侧边栏
+    return f"""{hospital} 暂无患者交流群，请通过以下方式创建：
+
+1. 在企微聊天侧边栏打开「一键建群」工具
+2. 选择 {hospital}，点击一键建群
+
+创建完成后系统会自动生成入群活码，群满200人自动创建新群。"""
+
+
+def _tool_list_groups(args):
+    """tool: 列出群"""
+    group_type = args.get("group_type", "")
+    conn = sqlite3.connect('wecom_cache.db')
+    cursor = conn.cursor()
+    result_lines = []
+
+    if not group_type or group_type == "group_b":
+        cursor.execute("SELECT chat_id, hospital, chat_name, member_count, status FROM group_b ORDER BY created_at DESC LIMIT 20")
+        rows = cursor.fetchall()
+        if rows:
+            result_lines.append("【群B - 医院大群】")
+            for row in rows:
+                result_lines.append(f"  {row[2]} (chat_id: {row[0]}, 医院: {row[1]}, 人数: {row[3]}/200, 状态: {row[4]})")
+
+    conn.close()
+    return "\n".join(result_lines) if result_lines else "暂无群数据"
+
+
+def _tool_send_group_b_announcement(employee_userid, args):
+    """tool: 在群B发送公共通知"""
+    hospital = args.get("hospital", "")
+    content = args.get("content", "")
+
+    from app.database import get_group_b_by_hospital
+    group_b_rows = get_group_b_by_hospital(hospital)
+    if not group_b_rows:
+        return f"未找到 {hospital} 的群B，请先创建"
+
+    # 客户群需要通过群机器人webhook或appchat发送
+    # 这里先通过企微应用消息通知员工手动发
+    send_wecom_message(employee_userid,
+                       f"请在 {hospital} 患者交流群中发送以下通知：\n\n【通知】{content}")
+    return f"已提醒在 {hospital} 交流群中发送通知"
+
+
+def _tool_get_group_b_qr(employee_userid, args):
+    """tool: 获取某医院的群B活码"""
+    hospital = args.get("hospital", "")
+    if not hospital:
+        return "请指定医院名称"
+
+    from app.group_b_api import ensure_group_b_live_qr
+    qr_url = ensure_group_b_live_qr(hospital)
+    if qr_url:
+        return f"{hospital} 病友交流群活码：{qr_url}\n\n患者扫描此二维码即可加入群聊。"
+    else:
+        return f"{hospital} 暂无群B，请先通过侧边栏「一键建群」创建客户群。"
+
+
 def chat_with_ai_and_execute(employee_userid, user_message):
-    """面向员工的LLM对话（自建应用场景），支持tool calling"""
+    """面向员工的LLM对话（自建应用场景），支持tool calling
+
+    v5新增工具：create_group_b, list_groups, send_group_b_announcement, get_group_b_qr
+    千院千群新增工具：add_hospital
+    """
     if user_message.strip() == "sync data":
         send_wecom_message(employee_userid, "syncing...")
         result = sync_employee_customers(employee_userid)
@@ -72,12 +174,82 @@ def chat_with_ai_and_execute(employee_userid, user_message):
             "type": "function",
             "function": {
                 "name": "get_kf_link",
-                "description": "获取微信客服链接，当员工需要客服链接、客服二维码、让患者联系客服、患者入口等场景时调用。可指定客户姓名生成专属链接，系统会自动关联该客户",
+                "description": "获取微信客服链接，当员工需要客服链接、客服二维码、让患者联系客服、患者入口等场景时调用",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "customer_name": {"type": "string", "description": "可选，指定客户姓名以生成专属链接，实现自动关联"}
+                        "customer_name": {"type": "string", "description": "可选，指定客户姓名以生成专属链接"}
                     }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_hospital",
+                "description": "添加医院到系统，当员工需要新增医院、添加新医院、配置新医院时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "hospital": {"type": "string", "description": "医院名称"}
+                    },
+                    "required": ["hospital"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_group_b",
+                "description": "为指定医院创建或查找患者交流大群（群B），当员工要求创建医院群、病友群、交流群时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "hospital": {"type": "string", "description": "医院名称"}
+                    },
+                    "required": ["hospital"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_groups",
+                "description": "查看当前群列表",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "group_type": {"type": "string", "description": "群类型：group_b(医院大群)，不填则全部"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_group_b_announcement",
+                "description": "在医院患者交流群（群B）中发送公共通知",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "hospital": {"type": "string", "description": "医院名称"},
+                        "content": {"type": "string", "description": "通知内容"}
+                    },
+                    "required": ["hospital", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_group_b_qr",
+                "description": "获取某医院的患者交流群活码二维码链接，当员工需要群二维码、入群链接时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "hospital": {"type": "string", "description": "医院名称"}
+                    },
+                    "required": ["hospital"]
                 }
             }
         }
@@ -97,14 +269,29 @@ def chat_with_ai_and_execute(employee_userid, user_message):
     if message_obj.get("tool_calls"):
         for tool_call in message_obj["tool_calls"]:
             fn_name = tool_call["function"]["name"]
+            args = json.loads(tool_call["function"]["arguments"])
+
             if fn_name == "modify_customer_remark":
-                args = json.loads(tool_call["function"]["arguments"])
                 result_str = modify_customer_remark(employee_userid, args["customer_name"], args["new_remark"])
                 send_wecom_message(employee_userid, f"result: {result_str}")
             elif fn_name == "get_kf_link":
-                args = json.loads(tool_call["function"]["arguments"])
                 customer_name = args.get("customer_name")
                 result_str = _get_kf_link(employee_userid, customer_name)
+                send_wecom_message(employee_userid, result_str)
+            elif fn_name == "add_hospital":
+                result_str = _tool_add_hospital(args)
+                send_wecom_message(employee_userid, result_str)
+            elif fn_name == "create_group_b":
+                result_str = _tool_create_group_b(employee_userid, args)
+                send_wecom_message(employee_userid, result_str)
+            elif fn_name == "list_groups":
+                result_str = _tool_list_groups(args)
+                send_wecom_message(employee_userid, result_str)
+            elif fn_name == "send_group_b_announcement":
+                result_str = _tool_send_group_b_announcement(employee_userid, args)
+                send_wecom_message(employee_userid, result_str)
+            elif fn_name == "get_group_b_qr":
+                result_str = _tool_get_group_b_qr(employee_userid, args)
                 send_wecom_message(employee_userid, result_str)
     else:
         final_reply = message_obj.get("content", "I don't understand.")
@@ -114,13 +301,10 @@ def chat_with_ai_and_execute(employee_userid, user_message):
 def chat_with_kf_ai(external_userid, user_message, open_kfid):
     """面向客户的LLM对话（微信客服场景），带历史记录和患者上下文"""
     try:
-        # 保存用户消息到历史
         save_chat_history(external_userid, open_kfid, 'user', user_message)
 
-        # 读取最近20条历史
         rows = get_chat_history(external_userid, open_kfid, limit=20)
 
-        # 动态构建system prompt
         system_prompt = KF_SYSTEM_PROMPT_BASE
         patient_ctx = get_patient_context_for_prompt(external_userid)
         if patient_ctx:
@@ -133,7 +317,6 @@ def chat_with_kf_ai(external_userid, user_message, open_kfid):
 
 注意：该客户已提供手机尾号并匹配成功，不要再询问手机尾号。如客户有其他问题请正常回答。"""
 
-        # 构建消息列表（按时间正序）
         messages = [{"role": "system", "content": system_prompt}]
         for role, content in reversed(rows):
             messages.append({"role": role, "content": content})
@@ -147,10 +330,8 @@ def chat_with_kf_ai(external_userid, user_message, open_kfid):
         resp = raw_resp.json()
         reply = resp["choices"][0]["message"].get("content", "抱歉，我暂时无法回答，请稍后再试。")
 
-        # 保存AI回复到历史
         save_chat_history(external_userid, open_kfid, 'assistant', reply)
 
-        # 发送回复给客户
         result = kf_send_msg(external_userid, open_kfid, reply)
         print(f"[KF AI] reply to {external_userid}: {reply[:50]}... result={result.get('errcode')}")
 

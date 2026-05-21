@@ -4,7 +4,6 @@
 """
 import time
 import uuid
-import sqlite3
 import requests
 from app.config import KF_OPEN_KFID
 from app.wechat_api import get_wecom_access_token
@@ -44,18 +43,15 @@ def kf_sync_msg(open_kfid, callback_token, cursor=""):
 
 
 def kf_send_msg(touser, open_kfid, content):
-    """发送消息给客户（需在48小时/5条限制内）"""
+    """发送消息给客户（48小时内可回复，每次用户消息后可回复5条）"""
     row = get_kf_conversation(touser, open_kfid)
 
     if row:
-        last_msg_time, reply_count = row
+        last_msg_time = row[0]
         now = time.time()
         if now - last_msg_time > 172800:
             print(f"[KF] 超过48小时，无法回复客户 {touser}")
             return {"errcode": -1, "errmsg": "exceeded 48h limit"}
-        if reply_count >= 5:
-            print(f"[KF] 已达5条回复上限，无法回复客户 {touser}")
-            return {"errcode": -1, "errmsg": "exceeded 5 msg limit"}
 
     token = get_kf_access_token()
     url = f"https://qyapi.weixin.qq.com/cgi-bin/kf/send_msg?access_token={token}"

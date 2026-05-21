@@ -35,7 +35,6 @@ def check_and_follow_up():
         second_ask_dt = _parse_datetime(second_ask_time)
 
         if follow_up_count == 0 and first_ask_dt:
-            # 距首次询问>=24小时，进行第二次跟进
             if (now - first_ask_dt).total_seconds() >= 86400:
                 print(f"[SCHEDULER] 24h跟进: {external_userid}")
                 result = kf_send_msg(external_userid, open_kfid,
@@ -46,12 +45,10 @@ def check_and_follow_up():
                     print(f"[SCHEDULER] 24h跟进发送失败: {result}")
 
         elif follow_up_count == 1 and second_ask_dt:
-            # 距第二次询问>=24小时(即距首次48小时)，标记为未回复
             if (now - second_ask_dt).total_seconds() >= 86400:
                 print(f"[SCHEDULER] 48h未回复: {external_userid}")
                 mark_no_response(external_userid)
 
-                # 修改备注：加"-未回复"
                 emp_userid = employee_userid or DEFAULT_EMPLOYEE_USERID
                 if patient_name and hospital:
                     remark = f"{hospital}+{patient_name}-未回复"
@@ -67,7 +64,6 @@ def check_and_follow_up():
                 update_customer_remark_and_desc(emp_userid, get_contact_external_userid(external_userid), remark, "患者未回复手机尾号")
                 no_response_list.append(remark)
 
-    # 如果有未回复的患者，立即通知员工
     if no_response_list:
         report = "以下患者2次跟进未回复：\n"
         for i, name in enumerate(no_response_list, 1):

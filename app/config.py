@@ -33,6 +33,11 @@ KF_OPEN_KFID = os.getenv("KF_OPEN_KFID", "")
 
 # ================= 员工配置 =================
 DEFAULT_EMPLOYEE_USERID = os.getenv("DEFAULT_EMPLOYEE_USERID", "CaoHuiLin")
+SECOND_EMPLOYEE_USERID = os.getenv("SECOND_EMPLOYEE_USERID", "Mo")
+
+# ================= 千院千群配置 =================
+TOOL_PERSON_EXTERNAL_USERID = os.getenv("TOOL_PERSON_EXTERNAL_USERID", "")
+H5_BASE_URL = os.getenv("H5_BASE_URL", "")
 
 # ================= 加密器 =================
 app_crypto = WeChatCrypto(APP_TOKEN, APP_AES_KEY, WECOM_CORP_ID)
@@ -45,11 +50,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # ================= 欢迎语模板 =================
 WELCOME_MESSAGE = """您好！我是您的专属营养顾问助手
 
-为了更好地为您提供服务，请回复您的【手机尾号后4位】，我将为您匹配专属营养方案。"""
+请点击下方链接，进入客服会话，我们将为您提供一对一服务。"""
 
 KF_WELCOME_MESSAGE = """您好！我是您的专属营养顾问助手
 
-为了更好地为您提供服务，请回复您的【手机尾号后4位】，我将为您匹配专属营养方案。"""
+为了更好地为您提供服务，请先回复您的【手机尾号后4位】，然后再回复您的【姓名】，我们将为您匹配专属营养方案。"""
 
 # ================= AI 系统提示词 =================
 KF_SYSTEM_PROMPT_BASE = """你是一位专业、友好的企业微信客服助手，专注于营养健康领域。你的工作流程：

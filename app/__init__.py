@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-企业微信自动接待系统 - 应用入口
+企业微信自动接待系统 v5 - 应用入口
 """
 from dotenv import load_dotenv
 

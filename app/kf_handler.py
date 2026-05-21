@@ -12,6 +12,7 @@ from app.wechat_kf_api import (
 from app.database import (
     save_kf_cursor, get_kf_cursor,
     update_kf_conversation, update_kf_service_state,
+    update_kf_phone_tail, update_kf_patient_name,
     match_patient, insert_reception_on_kf_enter,
     insert_reception_on_phone_tail, get_scene_mapping,
     get_reception_progress_by_external
@@ -70,7 +71,14 @@ def process_kf_notification(callback_token, open_kfid):
 
 
 def _handle_customer_message(msg, msgtype, external_userid, msg_open_kfid):
-    """处理客户发送的消息 (origin==3)"""
+    """处理客户发送的消息 (origin==3)
+
+    收集流程：
+    1. 患者先发手机尾号(4位数字) → 保存，询问姓名
+    2. 患者再发姓名 → 用尾号+姓名匹配患者库
+    3. 匹配成功 → 走 handle_patient_matched
+    4. 匹配失败 → 提示信息不匹配
+    """
     update_kf_conversation(external_userid, msg_open_kfid, is_customer_msg=True)
 
     # 确保会话状态为"由智能助手接待"(1)
@@ -84,20 +92,71 @@ def _handle_customer_message(msg, msgtype, external_userid, msg_open_kfid):
         content = msg.get("text", {}).get("content", "").strip()
         print(f"[KF] 客户消息: {content}")
 
-        # 如果是4位纯数字，记录为手机尾号并匹配患者
+        # 获取当前会话中已收集的信息
+        conv = get_kf_conversation_row(external_userid, msg_open_kfid)
+        existing_phone_tail = conv.get("phone_tail", "") if conv else ""
+        existing_patient_name = conv.get("patient_name", "") if conv else ""
+
+        # 检查是否已匹配过患者（已匹配则走AI）
+        if _already_matched(external_userid):
+            chat_with_kf_ai(external_userid, content, msg_open_kfid)
+            return
+
+        # 步骤1：收到4位纯数字 → 记录为手机尾号
         if content.isdigit() and len(content) == 4:
-            print(f"[KF] 收到手机尾号: {content}, external_userid={external_userid}")
-            patient_info = match_patient(content)
-            insert_reception_on_phone_tail(external_userid, content, patient_info)
+            if not existing_phone_tail:
+                update_kf_phone_tail(external_userid, msg_open_kfid, content)
+                print(f"[KF] 收到手机尾号: {content}, 询问姓名")
+                kf_send_msg(external_userid, msg_open_kfid,
+                            f"已收到您的手机尾号 {content}，请再告诉我您的姓名，以便核实身份。")
+                return
+            else:
+                # 已有尾号，又发了一个4位数（可能是输错了想重输）
+                update_kf_phone_tail(external_userid, msg_open_kfid, content)
+                existing_phone_tail = content
+
+        # 步骤2：已有尾号，收到姓名 → 尝试匹配
+        if existing_phone_tail and not existing_patient_name:
+            # 把非4位数字的消息当作姓名
+            update_kf_patient_name(external_userid, msg_open_kfid, content)
+            existing_patient_name = content
+            print(f"[KF] 收到姓名: {content}, 尝试匹配 尾号={existing_phone_tail}+姓名={content}")
+
+            patient_info = match_patient(existing_phone_tail, existing_patient_name)
+            insert_reception_on_phone_tail(external_userid, existing_phone_tail, patient_info)
 
             if patient_info:
                 handle_patient_matched(external_userid, patient_info, msg_open_kfid)
             else:
-                kf_send_msg(external_userid, msg_open_kfid,
-                            "抱歉，未找到与您手机尾号匹配的信息，请确认尾号是否正确，或联系人工客服。")
-        else:
-            # 普通文本消息，走AI回复
-            chat_with_kf_ai(external_userid, content, msg_open_kfid)
+                # 尾号+姓名不匹配，尝试仅用尾号匹配看看
+                patient_by_tail = match_patient(existing_phone_tail)
+                if patient_by_tail:
+                    kf_send_msg(external_userid, msg_open_kfid,
+                                f"您输入的姓名与手机尾号 {existing_phone_tail} 对应的记录不一致，请确认姓名是否正确。\n"
+                                f"如需重新输入，请直接发送正确的姓名。")
+                else:
+                    kf_send_msg(external_userid, msg_open_kfid,
+                                "抱歉，未找到与您提供的信息匹配的记录，请确认手机尾号和姓名是否正确，或联系人工客服。")
+            return
+
+        # 步骤3：已有尾号+姓名，但之前匹配失败，收到新姓名 → 重新匹配
+        if existing_phone_tail and existing_patient_name:
+            if not content.isdigit():
+                # 更新姓名并重新匹配
+                update_kf_patient_name(external_userid, msg_open_kfid, content)
+                print(f"[KF] 更新姓名: {content}, 重新匹配 尾号={existing_phone_tail}")
+                patient_info = match_patient(existing_phone_tail, content)
+                insert_reception_on_phone_tail(external_userid, existing_phone_tail, patient_info)
+
+                if patient_info:
+                    handle_patient_matched(external_userid, patient_info, msg_open_kfid)
+                else:
+                    kf_send_msg(external_userid, msg_open_kfid,
+                                "抱歉，仍然未找到匹配的记录，请联系人工客服获取帮助。")
+                return
+
+        # 无尾号时发来的非数字消息 → 走AI回复
+        chat_with_kf_ai(external_userid, content, msg_open_kfid)
 
     elif msgtype == "image":
         image_info = msg.get("image", {})
@@ -126,7 +185,7 @@ def _handle_kf_event(msg, msg_open_kfid):
         scene = event.get("scene", "")
         print(f"[KF] 用户进入会话: {ext_userid}, welcome_code={'有' if welcome_code else '无'}, scene={scene}")
 
-        # 从 scene 提取 wob ID（格式：employee_userid_映射ID，映射ID 对应 scene_mapping 表）
+        # 从 scene 提取 wob ID
         contact_ext_id = ""
         if scene and "_" in scene:
             parts = scene.rsplit("_", 1)
@@ -142,7 +201,7 @@ def _handle_kf_event(msg, msg_open_kfid):
         if trans_resp.get("errcode") != 0:
             print(f"[KF] 转智能助手失败: {trans_resp}")
 
-        # 发送欢迎语（welcome_code 仅首次进入会话时返回）
+        # 发送欢迎语
         if welcome_code:
             result = kf_send_msg_on_event(welcome_code, KF_WELCOME_MESSAGE)
             print(f"[KF] 欢迎语发送结果(event): {result}")
@@ -166,3 +225,27 @@ def _handle_kf_event(msg, msg_open_kfid):
 
     else:
         print(f"[KF] 未知事件: {event_type}")
+
+
+def get_kf_conversation_row(external_userid, open_kfid):
+    """获取会话完整信息（含phone_tail, patient_name）"""
+    from app.database import get_kf_conversation
+    row = get_kf_conversation(external_userid, open_kfid)
+    if not row:
+        return None
+    # row = (last_customer_msg_time, reply_count, phone_tail, patient_name)
+    return {
+        "last_customer_msg_time": row[0],
+        "reply_count": row[1],
+        "phone_tail": row[2] if len(row) > 2 else "",
+        "patient_name": row[3] if len(row) > 3 else ""
+    }
+
+
+def _already_matched(external_userid):
+    """检查该患者是否已匹配成功（有接待进度且已匹配）"""
+    from app.database import get_reception_progress_by_external
+    progress = get_reception_progress_by_external(external_userid)
+    if progress and progress.get("phone_tail"):
+        return True
+    return False
